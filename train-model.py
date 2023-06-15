@@ -10,19 +10,49 @@ from enum import Enum
 import matplotlib.pyplot as plt
 
 from dasf_seismic.attributes.complex_trace import Envelope, CosineInstantaneousPhase,InstantaneousFrequency
-from dasf.transforms import ArraysToDataFrame, PersistDaskData
+from dasf.transforms import PersistDaskData
 from dasf.pipeline import Pipeline
 from dasf.datasets import Dataset
-#from dasf.ml.xgboost import XGBRegressor
 from dasf.ml.xgboost import XGBRegressor
 from dasf.pipeline.executors import DaskPipelineExecutor
 from dasf.utils.decorators import task_handler
 
-#docker run -it -v $(pwd):$(pwd) -e HOME=$(pwd) -w $(pwd) -u $(id -u):$(id -g) --network=host dasf-seismic:cpu python3 train-model.py --attribute ENVELOPE --data data/F3_train.zarr --samples-window 1 --trace-window 1 --inline-window 1 --address 143.106.16.211:8786 --output file/path
+class SaveModel(Transform):
+    def __transform_generic(self, model):
+        model.save_model()
 
-class DataToDataframe(Transform):
+    def _lazy_transform_cpu(self, X=None, **kwargs):
+        return self.__transform_generic(X)
 
-    def __create_dataframe_with_neighbors(self, data, inlineWindow, traceWindow, sampleWindow):
+    def _transform_cpu(self, X=None, **kwargs):
+        dfs = self.__transform_generic(X, y)
+
+        if is_array(dfs) and not is_dask_array(dfs):
+            datas = np.stack(dfs, axis=-1)
+            datas = pd.DataFrame(datas, columns=y)
+        else:
+            datas = dfs
+
+        return datas
+
+class ArraysToDataFrame(Transform):
+    def __init__(self, inlineWindow, traceWindow, sampleWindow):
+        self.inlineWindow = inlineWindow
+        self.sampleWindow = sampleWindow
+        self.traceWindow = traceWindow
+
+    def __create_dataframe_with_neighbors(self, data):
+        print()
+        print()
+        print()
+        print()
+        print()
+        print(type(data))
+        print(data)
+        print()
+        print()
+        print()
+        print()
         # Get the dimensions of the input array
         a, b, c = data.shape
 
@@ -41,7 +71,7 @@ class DataToDataframe(Transform):
                     z_vals = []
 
                     # Iterate over the neighbors' indices in each axis
-                    for x_offset in range(-inlineWindow, inlineWindow+1):
+                    for x_offset in range(-self.inlineWindow, self.inlineWindow+1):
                       if x_offset == 0:
                         continue
 
@@ -51,7 +81,7 @@ class DataToDataframe(Transform):
 
                       x_vals.append(data[x_idx, j, k])
 
-                    for y_offset in range(-traceWindow, traceWindow+1):
+                    for y_offset in range(-self.traceWindow, self.traceWindow+1):
                       if y_offset == 0:
                         continue
 
@@ -61,7 +91,7 @@ class DataToDataframe(Transform):
 
                       y_vals.append(data[i, y_idx, k])
 
-                    for z_offset in range(-sampleWindow, sampleWindow+1):
+                    for z_offset in range(-self.sampleWindow, self.sampleWindow+1):
                       if z_offset == 0:
                         continue
 
@@ -82,17 +112,23 @@ class DataToDataframe(Transform):
 
         return df
 
-    def _lazy_transform_cpu(self, data, inlineWindow, traceWindow, sampleWindow):
-        return self.__create_dataframe_with_neighbors(self, data, inlineWindow, traceWindow, sampleWindow)
+    def __transform_generic(self, X):
+        dfs = self.__create_dataframe_with_neighbors(X)
+        return dfs
 
-    def _lazy_transform_gpu(self, data, inlineWindow, traceWindow, sampleWindow):
-        return self.__create_dataframe_with_neighbors(self, data, inlineWindow, traceWindow, sampleWindow)
+    def _lazy_transform_cpu(self, X=None, **kwargs):
+        return self.__transform_generic(X)
 
-    def _transform_gpu(self, data, inlineWindow, traceWindow, sampleWindow):
-        return self.__create_dataframe_with_neighbors(self, data, inlineWindow, traceWindow, sampleWindow)
+    def _transform_cpu(self, X=None, **kwargs):
+        dfs = self.__transform_generic(X, y)
 
-    def _transform_cpu(self, data, inlineWindow, traceWindow, sampleWindow):
-        return self.__create_dataframe_with_neighbors(self, data, inlineWindow, traceWindow, sampleWindow)
+        if is_array(dfs) and not is_dask_array(dfs):
+            datas = np.stack(dfs, axis=-1)
+            datas = pd.DataFrame(datas, columns=y)
+        else:
+            datas = dfs
+
+        return datas
 
 class Attributes(Enum):
     ENVELOPE = "ENVELOPE"
@@ -171,7 +207,7 @@ def create_pipeline(dataset_path: str, executor: DaskPipelineExecutor, attribute
     envelope = Envelope()
     cosPhase = CosineInstantaneousPhase()
     instFreq = InstantaneousFrequency()
-    data2df = DataToDataframe()
+    data2df = ArraysToDataFrame(inlineWindow, traceWindow, sampleWindow)
     # Persist é super importante! Se não cada partial_fit do k-means vai computar o grafo até o momento!
     # Usando persist, garantimos que a computação até aqui já foi feita e está em memória distribuida.
     persist = PersistDaskData()
@@ -188,30 +224,21 @@ def create_pipeline(dataset_path: str, executor: DaskPipelineExecutor, attribute
 
     if attribute == Attributes.ENVELOPE.value:
         pipeline.add(envelope, X=dataset)
-        pipeline.add(data2df, data = dataset, inlineWindow = inlineWindow, traceWindow = traceWindow, sampleWindow = sampleWindow)
-        pipeline.add(persistX, X=Data2df)
-        pipeline.add(persistY, X=envelope)
-        pipeline.add(boostedTree.partial_fit, X=persistX, y=persistY)
-
+        pipeline.add(data2df, X=dataset)
     elif attribute == Attributes.INST_FREQ.value:
         pipeline.add(instFreq, X=dataset)
-        pipeline.add(data2df, data = dataset, inlineWindow = inlineWindow, traceWindow = traceWindow, sampleWindow = sampleWindow)
-        pipeline.add(persistX, X=Data2df)
-        pipeline.add(persistY, X=instFreq)
-        pipeline.add(boostedTree.partial_fit, X=persistX, y=persistY)
-
+        pipeline.add(data2df, X=dataset)
     elif attribute == Attributes.COS_INST_PHASE.value:
         pipeline.add(cosPhase, X=dataset)
-        pipeline.add(data2df, data = dataset, inlineWindow = inlineWindow, traceWindow = traceWindow, sampleWindow = sampleWindow)
-        pipeline.add(persistX, X=Data2df)
-        pipeline.add(persistY, X=cosPhase)
-        pipeline.add(boostedTree.partial_fit, X=persistX, y=persistY)
-
+        pipeline.add(data2df, X=dataset)
     else:
         print("\033[33m Atributo não reconhecido \033[0m")
+        return
 
-
-    pipeline.visualize()
+    pipeline.add(persist, X=data2df)
+    pipeline.add(boostedTree.fit, X=persist,  y=envelope)
+    pipeline.add(save_model,boostedTree)
+    pipeline.visualize(filename="./train-pipeline.jpg")
     
     # Retorna o pipeline e o operador kmeans, donde os resultados serão obtidos
     return pipeline, boostedTree
