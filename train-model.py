@@ -3,23 +3,63 @@ from pathlib import Path
 from typing import Callable, Tuple
 import dask.array as da
 import numpy as np
+import pandas as pd
 import time
+import dask.dataframe as dd
 from dasf.transforms.base import Transform
 from enum import Enum
-
 import matplotlib.pyplot as plt
 
 from dasf_seismic.attributes.complex_trace import Envelope, CosineInstantaneousPhase,InstantaneousFrequency
-from dasf.transforms import PersistDaskData
+from dasf.transforms import ArraysToDataFrame, PersistDaskData
 from dasf.pipeline import Pipeline
 from dasf.datasets import Dataset
 from dasf.ml.xgboost import XGBRegressor
 from dasf.pipeline.executors import DaskPipelineExecutor
 from dasf.utils.decorators import task_handler
 
+class MyDataset(Dataset):
+    """Classe para carregar dados de um arquivo .npy
+    """
+    def __init__(self, name: str, data_path: str, chunks: str = "32Mb"):
+        """Instancia um objeto da classe MyDataset
+
+        Parameters
+        ----------
+        name : str
+            Nome simbolicamente associado ao dataset
+        data_path : str
+            Caminho para o arquivo .npy
+        chunks: str
+            Tamanho dos chunks para o dask.array
+        """
+        super().__init__(name=name)
+        self.data_path = data_path
+        self.chunks = chunks
+        
+    def _lazy_load_cpu(self):
+        return da.from_zarr(self.data_path, chunks=self.chunks)
+    
+    def _load_cpu(self):
+        return np.load(self.data_path)
+    
+    @task_handler
+    def load(self):
+        ...
+
+class Attributes(Enum):
+    ENVELOPE = "ENVELOPE"
+    INST_FREQ = "INST-FREQ"
+    COS_INST_PHASE = "COS-INST-PHASE"
+
+# TODO: Implementar o método para salvar o modelo em um arquivo json:
+# Qual super classe usar? Já está implementado em algum lugar?
 class SaveModel(Transform):
+    def __init__(self, modelPath):
+        self.modelPath = modelPath
+
     def __transform_generic(self, model):
-        model.save_model()
+        model.save_model(self.modelPath)
 
     def _lazy_transform_cpu(self, X=None, **kwargs):
         return self.__transform_generic(X)
@@ -35,30 +75,20 @@ class SaveModel(Transform):
 
         return datas
 
-class ArraysToDataFrame(Transform):
+class DatasetToDataFrame(Transform):
     def __init__(self, inlineWindow, traceWindow, sampleWindow):
         self.inlineWindow = inlineWindow
         self.sampleWindow = sampleWindow
         self.traceWindow = traceWindow
 
     def __create_dataframe_with_neighbors(self, data):
-        print()
-        print()
-        print()
-        print()
-        print()
-        print(type(data))
-        print(data)
-        print()
-        print()
-        print()
-        print()
+        print("Executando a extração de vizinhos")
+        print(f"Shape do dado: {data.shape}")
         # Get the dimensions of the input array
-        a, b, c = data.shape
-
         # Create empty lists to store the data for the DataFrame
         neighbors = []
 
+        a, b, c = data.shape
         # Iterate over each point in the input array
         for i in range(a):
             for j in range(b):
@@ -107,19 +137,24 @@ class ArraysToDataFrame(Transform):
 
                     # Store the neighbor values
                     neighbors.append(neighbor_values)
+                    print(neighbors)
+    
+        pd.DataFrame(neighbors).to_csv("neighbors.csv")
+        dask_df = dd.from_pandas(pd.DataFrame(neighbors), npartitions=1) # You can adjust the number of partitions as needed
 
-        df = pd.DataFrame(neighbors)
-
-        return df
+        return dask_df
 
     def __transform_generic(self, X):
+        print(f"Tipo do X: {type(X)}")
         dfs = self.__create_dataframe_with_neighbors(X)
         return dfs
 
     def _lazy_transform_cpu(self, X=None, **kwargs):
+        print("Executando lazy_transform_cpu")
         return self.__transform_generic(X)
 
     def _transform_cpu(self, X=None, **kwargs):
+        print("executando tranform_cpu")
         dfs = self.__transform_generic(X, y)
 
         if is_array(dfs) and not is_dask_array(dfs):
@@ -130,39 +165,39 @@ class ArraysToDataFrame(Transform):
 
         return datas
 
-class Attributes(Enum):
-    ENVELOPE = "ENVELOPE"
-    INST_FREQ = "INST-FREQ"
-    COS_INST_PHASE = "COS-INST-PHASE"
+class Repartition(Transform):
 
-class MyDataset(Dataset):
-    """Classe para carregar dados de um arquivo .npy
-    """
-    def __init__(self, name: str, data_path: str, chunks: str = "32Mb"):
-        """Instancia um objeto da classe MyDataset
+    def __transform_generic(self, X, y):
+        print(f"Tipo do X: {type(X)}, tipo de y: {type(y)}")
+        print(f"Partições de X: {X.npartitions}, partições de y: {y.npartitions}")
+        print(f"Shape de X: {X.shape}, shape de y: {y.shape}")
+        return X.repartition(npartitions=y.npartitions)
 
-        Parameters
-        ----------
-        name : str
-            Nome simbolicamente associado ao dataset
-        data_path : str
-            Caminho para o arquivo .npy
-        chunks: str
-            Tamanho dos chunks para o dask.array
-        """
-        super().__init__(name=name)
-        self.data_path = data_path
-        self.chunks = chunks
-        
-    def _lazy_load_cpu(self):
-        return da.from_zarr(self.data_path, chunks=self.chunks)
-    
-    def _load_cpu(self):
-        return np.load(self.data_path)
-    
-    @task_handler
-    def load(self):
-        ...
+    def _lazy_transform_cpu(self, X=None, **kwargs):
+        print("Executando lazy_transform_cpu")
+        return self.__transform_generic(X, kwargs["y"])
+
+    def _transform_cpu(self, X=None, **kwargs):
+        print("executando tranform_cpu")
+        return self.__transform_generic(X, kwargs["y"])
+
+def define_attribute(attribute):
+    envelope = Envelope()
+    cosPhase = CosineInstantaneousPhase()
+    instFreq = InstantaneousFrequency()
+
+    if attribute == Attributes.ENVELOPE.value:
+        return envelope
+
+    elif attribute == Attributes.INST_FREQ.value:
+        return instFreq
+
+    elif attribute == Attributes.COS_INST_PHASE.value:
+        return cosInstPhase
+
+    else:
+        print("\033[33m Atributo não reconhecido \033[0m")
+        return
 
 def create_executor(address: str=None) -> DaskPipelineExecutor:
     """Cria um DASK executor
@@ -185,7 +220,9 @@ def create_executor(address: str=None) -> DaskPipelineExecutor:
     else:
         return DaskPipelineExecutor(local=True, use_gpu=False)
         
-def create_pipeline(dataset_path: str, executor: DaskPipelineExecutor, attribute:str = None, inlineWindow:int = None, traceWindow:int = None, sampleWindow:int = None) -> Tuple[Pipeline, Callable]:
+def create_pipeline(dataset_path: str, executor: DaskPipelineExecutor, 
+    attribute:str = None, inlineWindow:int = None, traceWindow:int = None, 
+    sampleWindow:int = None, outputPath:str = "model.json") -> Tuple[Pipeline, Callable]:
     """Cria o pipeline DASF para ser executado
 
     Parameters
@@ -198,50 +235,43 @@ def create_pipeline(dataset_path: str, executor: DaskPipelineExecutor, attribute
     Returns
     -------
     Tuple[Pipeline, Callable]
-        Uma tupla, onde o primeiro elemento é o pipeline e o segundo é último operador (kmeans.fit_predict), 
+        Uma tupla, onde o primeiro elemento é o pipeline e o segundo é último operador (xgbRegressor.predict), 
         de onde os resultados serão obtidos.
     """
     print("Criando pipeline....")
     # Declarando os operadores necessários
-    dataset = MyDataset(name="F3 dataset", data_path=dataset_path)
-    envelope = Envelope()
-    cosPhase = CosineInstantaneousPhase()
-    instFreq = InstantaneousFrequency()
-    data2df = ArraysToDataFrame(inlineWindow, traceWindow, sampleWindow)
-    # Persist é super importante! Se não cada partial_fit do k-means vai computar o grafo até o momento!
-    # Usando persist, garantimos que a computação até aqui já foi feita e está em memória distribuida.
+    dataset = MyDataset(name="F3 dataset", data_path=dataset_path, chunks={0: "auto",1: "auto", 2: -1} )
     persist = PersistDaskData()
-    y = None
+    array2df = ArraysToDataFrame()
+
+    # classes customizadas
+    data2df = DatasetToDataFrame(inlineWindow, traceWindow, sampleWindow)
+    saveModel = SaveModel(modelPath=outputPath)
+    repartition = Repartition()
+
 
     # Cria um objeto XGBoost
-    boostedTree = XGBRegressor()
+    xgbRegressor = XGBRegressor()
+
+    attrToUse = define_attribute(attribute)
+    print(f"Attribute: {attrToUse}")
     # Compondo o pipeline
     pipeline = Pipeline(
         name="F3 seismic attributes",
         executor=executor
     )
-    pipeline.add(dataset)
-
-    if attribute == Attributes.ENVELOPE.value:
-        pipeline.add(envelope, X=dataset)
-        pipeline.add(data2df, X=dataset)
-    elif attribute == Attributes.INST_FREQ.value:
-        pipeline.add(instFreq, X=dataset)
-        pipeline.add(data2df, X=dataset)
-    elif attribute == Attributes.COS_INST_PHASE.value:
-        pipeline.add(cosPhase, X=dataset)
-        pipeline.add(data2df, X=dataset)
-    else:
-        print("\033[33m Atributo não reconhecido \033[0m")
-        return
-
-    pipeline.add(persist, X=data2df)
-    pipeline.add(boostedTree.fit, X=persist,  y=envelope)
-    pipeline.add(save_model,boostedTree)
-    pipeline.visualize(filename="./train-pipeline.jpg")
+    pipeline.add(dataset) # load raw dataset
+    pipeline.add(attrToUse, X=dataset) # apply seismic attribute
+    pipeline.add(data2df, X=dataset) # conert dataset to dataframe and add its neighbors
+    pipeline.add(array2df, attrToUse=attrToUse) # convert array to dask dataframe
+    pipeline.add(repartition, X=data2df, y=array2df) # repartition dataframe
+    pipeline.add(persist, X=repartition) # persist data in memory
+    pipeline.add(xgbRegressor.fit, X=persist,  y=array2df)
+    #pipeline.add(saveModel,model = xgbRegressor) # save model in .json file
+    #pipeline.visualize(filename="train-pipeline")
     
     # Retorna o pipeline e o operador kmeans, donde os resultados serão obtidos
-    return pipeline, boostedTree
+    return pipeline, xgbRegressor.predict
 
 def run(pipeline: Pipeline, last_node: Callable, output: str = None) -> np.ndarray:
     """Executa o pipeline e retorna o resultado
@@ -265,11 +295,6 @@ def run(pipeline: Pipeline, last_node: Callable, output: str = None) -> np.ndarr
     res = res.compute()
     end = time.time()
 
-
-    if output:
-        print(f"\033[31m Salvando o modelo treinado em {output} \033[0m")
-        last_node.save_model(model-filename.json)
-    
     print(f"Feito! Tempo de execução: {end - start:.2f} s")
     return res
     
@@ -291,7 +316,7 @@ if __name__ == "__main__":
     # Criamos o executor
     executor = create_executor(args.address)
     # Depois o pipeline
-    pipeline, last_node = create_pipeline(args.data, executor, args.attribute, args.samples_window, args.trace_window, args.inline_window)
+    pipeline, last_node = create_pipeline(args.data, executor, args.attribute, args.samples_window, args.trace_window, args.inline_window, args.output)
     # Executamos e pegamos o resultado
     res = run(pipeline, last_node, args.output)
     print(f"O resultado é um array com o shape: {res.shape}")
