@@ -5,7 +5,6 @@ import dask.array as da
 import numpy as np
 import pandas as pd
 import time
-import json
 import dask.dataframe as dd
 from dasf.transforms.base import Transform
 from enum import Enum
@@ -61,8 +60,6 @@ class SaveModel(Transform):
 
     def __transform_generic(self, model):
         model.save_model(self.modelPath)
-        with open(self.modelPath, 'w') as f:
-            json.dump(model.get_params(), f)
 
     def _lazy_transform_cpu(self, X=None, **kwargs):
         return self.__transform_generic(X)
@@ -85,43 +82,68 @@ class DatasetToDataFrame(Transform):
         self.traceWindow = traceWindow
 
     def __create_dataframe_with_neighbors(self, data):
-        a, b, c = data.shape
+        print("Executando a extração de vizinhos")
+        print(f"Shape do dado: {data.shape}")
+        # Get the dimensions of the input array
+        # Create empty lists to store the data for the DataFrame
+        neighbors = da.zeros((data.shape[0] * data.shape[1] * data.shape[2], 1 + 2 * self.inlineWindow + 2 * self.traceWindow + 2 * self.sampleWindow))
 
-        # Calculate the neighbors using Dask array operations
-        neighbors = da.zeros((a, b, c, 1 + 2 * self.inlineWindow + 2 * self.traceWindow + 2 * self.sampleWindow))
-        neighbors[:, :, :, 0] = data
+        a, b, c = 10, 10, 10 #data.shape
+        line = 0
+        print(f"O dado que vai ser inserido no dataframe é esse aqui: {data[0,0,0]}")
+        # Iterate over each point in the input array
+        for i in range(a):
+            for j in range(b):
+                for k in range(c):
+                    neighbors[line, 0] = data[i, j, k]
 
-        for x_offset in range(-self.inlineWindow, self.inlineWindow+1):
-            if x_offset == 0:
-                continue
+                    # Iterate over the neighbors' indices in each axis
+                    collumn = 1
+                    for x_offset in range(-self.inlineWindow, self.inlineWindow+1):
+                        if x_offset == 0:
+                            continue
 
-            x_idx = da.clip(da.arange(a) + x_offset, 0, a - 1).astype(int)
-            neighbors[:, :, :, x_offset + self.inlineWindow] = data[x_idx, :, :]
+                        x_idx = i + x_offset
+                        if x_idx < 0 or x_idx >= a:
+                            x_idx = 0 if x_idx < 0 else a - 1
+                        
+                        neighbors[line, collumn] = data[x_idx, j, k]
+                        collumn += 1
 
-        for y_offset in range(-self.traceWindow, self.traceWindow+1):
-            if y_offset == 0:
-                continue
+                    collumn = 1 + 2 * self.inlineWindow
+                    for y_offset in range(-self.traceWindow, self.traceWindow+1):
+                        if y_offset == 0:
+                            continue
 
-            y_idx = da.clip(da.arange(b) + y_offset, 0, b - 1).astype(int)
-            neighbors[:, :, :, y_offset + self.inlineWindow + 2 * self.traceWindow] = data[:, y_idx, :]
+                        y_idx = j + y_offset
+                        if y_idx < 0 or y_idx >= b:
+                            y_idx = 0 if y_idx < 0 else b - 1
 
-        for z_offset in range(-self.sampleWindow, self.sampleWindow+1):
-            if z_offset == 0:
-                continue
+                        neighbors[line, collumn] = data[i, y_idx, k]
+                        collumn += 1
 
-            z_idx = da.clip(da.arange(c) + z_offset, 0, c - 1).astype(int)
-            neighbors[:, :, :, z_offset + self.inlineWindow + 2 * self.traceWindow + 2 * self.sampleWindow] = data[:, :, z_idx]
+                    collumn = 1 + 2 * self.inlineWindow + 2 * self.traceWindow
+                    for z_offset in range(-self.sampleWindow, self.sampleWindow+1):
+                        if z_offset == 0:
+                            continue
 
-        # Reshape the neighbors array for creating the DataFrame
-        neighbors = neighbors.reshape((-1, 1 + 2 * self.inlineWindow + 2 * self.traceWindow + 2 * self.sampleWindow))
+                        z_idx = k + z_offset
+                        if z_idx < 0 or z_idx >= c:
+                            z_idx = 0 if z_idx < 0 else c - 1
 
-        # Create a Dask DataFrame from the reshaped neighbors array
-        dask_df = dd.from_dask_array(neighbors)
+                        neighbors[line, collumn] = data[i, j, z_idx]
+                        collumn += 1
+                    
+                    line += 1
 
+        #print(f"type of neighbors array is: {type(neighbors)}")
+        dask_df = dd.from_array(neighbors)
+
+        #print(f"Shape do dado que vai ser inserido no dataframe: {dask_df1.shape}, tipo do dado: {type(dask_df1)}")
         return dask_df
 
     def __transform_generic(self, X):
-    
+
         return self.__create_dataframe_with_neighbors(X)
 
     def _lazy_transform_cpu(self, X=None, **kwargs):
@@ -239,14 +261,14 @@ def create_pipeline(dataset_path: str, executor: DaskPipelineExecutor,
     pipeline.add(attrToUse, X=dataset) # apply seismic attribute
     pipeline.add(data2df, X=dataset) # conert dataset to dataframe and add its neighbors
     pipeline.add(array2df, attrToUse=attrToUse) # convert array to dask dataframe
-    pipeline.add(repartition, X=data2df, y=array2df) # repartition dataframe
-    pipeline.add(persist, X=repartition) # persist data in memory
-    pipeline.add(xgbRegressor.fit, X=persist,  y=array2df)
+    #pipeline.add(repartition, X=data2df, y=array2df) # repartition dataframe
+    #pipeline.add(persist, X=repartition) # persist data in memory
+    #pipeline.add(xgbRegressor.fit, X=persist,  y=array2df)
     #pipeline.add(saveModel,model = xgbRegressor) # save model in .json file
     #pipeline.visualize(filename="train-pipeline")
     
     # Retorna o pipeline e o operador kmeans, donde os resultados serão obtidos
-    return pipeline, xgbRegressor.predict
+    return pipeline, array2df#xgbRegressor.predict
 
 def run(pipeline: Pipeline, last_node: Callable, output: str = None) -> np.ndarray:
     """Executa o pipeline e retorna o resultado
@@ -267,6 +289,8 @@ def run(pipeline: Pipeline, last_node: Callable, output: str = None) -> np.ndarr
     start = time.time()
     pipeline.run()
     res = pipeline.get_result_from(last_node)
+    print(res)
+    print(res.compute())
     res = res.compute()
     end = time.time()
 
@@ -294,7 +318,7 @@ if __name__ == "__main__":
     pipeline, last_node = create_pipeline(args.data, executor, args.attribute, args.samples_window, args.trace_window, args.inline_window, args.output)
     # Executamos e pegamos o resultado
     res = run(pipeline, last_node, args.output)
-    print(f"O resultado é um array com o shape: {res.shape}")
+    #print(f"O resultado é um array com o shape: {res.shape}")
     
     # Podemos fazer o reshape e printar a primeira inline
     #if args.save_inline_fig is not None:
